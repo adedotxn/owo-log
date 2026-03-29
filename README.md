@@ -76,8 +76,8 @@ The sheet needs three tabs set up as follows:
 
 | Category | Keywords |
 |---|---|
-| Food Delivery | FoodExpress, Foodhut, Captain Cook, Leeyah |
-| Near-home Groceries | MARY NGOZI, ROSE TSOGBE |
+| Food Delivery | FoodExpress, Captain Cook |
+| Near-home Groceries | STORE_NEAR_YOU, GROCERY_STORE |
 | ... | ... |
 
 Keywords are comma-separated and matched case-insensitively against the transaction narration. Add or edit rows here at any time — the script reads this tab fresh on every run.
