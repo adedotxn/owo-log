@@ -1,0 +1,15 @@
+{
+  "name": "owo-log",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "sync": "bun run src/index.ts",
+    "setup": "bun run scripts/setup-auth.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
