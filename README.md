@@ -8,8 +8,9 @@ Personal finance automation tool. Reads Moniepoint transaction alert emails from
 2. Parses each email to extract amount, balance, date/time, narration, and direction
 3. Reads the **Categories** tab in your Google Sheet to build a keyword-to-category map
 4. Matches each transaction's narration against the keywords
-5. Appends rows to the **Transactions** tab
-6. Anything unmatched is written as `Uncategorized` with `Flagged = YES`
+5. Appends rows to the **Transactions** tab, grouped under a coloured period separator
+6. Writes a per-period summary block to the **Summary** tab
+7. Anything unmatched is written as `Uncategorized` with `Flagged = YES`
 
 ## Prerequisites
 
@@ -59,7 +60,8 @@ This prints a Google OAuth consent URL. Open it in your browser, grant access to
 
 The script will then ask:
 - **Write token to `.env`?** — say `Y` to update `GOOGLE_REFRESH_TOKEN` automatically, or `n` to copy it manually.
-- **Run `bun run sync` now?** — say `Y` to kick off the first sync immediately once the sheet is configured.
+- **Create missing sheet tabs?** — if `SHEET_ID` is already in `.env`, it will detect and offer to create any missing tabs with the correct headers.
+- **Run `bun run sync` now?** — say `Y` to kick off the first sync immediately.
 
 ### 5. Create the Google Sheet
 
@@ -70,44 +72,47 @@ https://docs.google.com/spreadsheets/d/SHEET_ID_HERE/edit
 
 Add it to `.env` as `SHEET_ID=` before running `bun run setup` (or before the first sync).
 
-#### Required tabs
+All three required tabs are created automatically with correct headers the first time you run `bun run sync` or `bun run setup`. You can also create them manually:
 
-`bun run setup` will detect missing tabs and offer to create them with the correct headers automatically. You can also create them manually:
+#### Transactions tab (A–J)
 
-**Transactions** tab — columns A–J, header in row 1:
-
-| A: Date | B: Time | C: Amount | D: Direction | E: Narration | F: Category | G: Balance | H: Bank | I: Flagged | J: Period |
+| Date | Time | Amount | Direction | Narration | Category | Balance | Bank | Flagged | Period |
 |---|---|---|---|---|---|---|---|---|---|
 | 30/04/2026 | 14:23:01 | 4500 | debit | POS PURCHASE SHOPRITE | Groceries | 120000 | Moniepoint | | 01/04/2026–30/04/2026 |
 | 30/04/2026 | 09:10:44 | 15000 | credit | TRANSFER FROM JOHN DOE | Uncategorized | 135000 | Moniepoint | YES | after:24/04/2026 |
 
-**Categories** tab — columns A–B, header in row 1, rules from row 2:
+Each sync batch is visually separated by a **coloured header row** and the transaction rows below it are **collapsible** (click the `▸` toggle in the left margin). The **Period** column (J) labels every row with its sync range.
 
-| A: Category | B: Keywords |
+#### Categories tab (A–B)
+
+| Category | Keywords |
 |---|---|
-| Food Delivery | FoodExpress, Captain Cook |
-| Near-home Groceries | STORE_NEAR_YOU, GROCERY_STORE |
-| ... | ... |
 | Food Delivery | FoodExpress, Foodhut, Captain Cook, Leeyah |
 | Groceries | SHOPRITE, SPAR, Justrite |
 | Transport | UBER, BOLT, RIDEPOOL |
-| Near-home Groceries | STORE_NEAR_YOU, GROCERY_STORE |
+| Near-home Groceries | MARY NGOZI, ROSE TSOGBE |
 
 Keywords are comma-separated and matched case-insensitively against the transaction narration. Add or edit rows here at any time — the script reads this tab fresh on every run. Any transaction with no keyword match is written as `Uncategorized` with `Flagged = YES`.
 
-> If a tab is missing when `bun run sync` runs, it is created automatically with the correct headers.
+#### Summary tab
 
-**Summary** tab (optional) — use `SUMIFS` formulas to track spending per category:
+Automatically written after every sync. Each period gets its own block:
 
-| A: Category | B: Total Spent |
-|---|---|
-| Groceries | `=SUMIFS(Transactions!C:C, Transactions!F:F, A2, Transactions!D:D, "debit")` |
-| Food Delivery | `=SUMIFS(Transactions!C:C, Transactions!F:F, A3, Transactions!D:D, "debit")` |
+```
+── 01/04/2026–30/04/2026 ──
+Category          Debits (₦)   Credits (₦)
+Groceries         45,000        0
+Transport         8,200         0
+Uncategorized     3,000         0
+TOTAL             56,200        15,000
+```
+
+Rows use live `SUMIFS` formulas filtered by period, so they stay accurate if you edit transactions or categories. Re-running the same sync range skips the summary write — it only appends once per period.
 
 ## Usage
 
 ```sh
-# Incremental sync — fetches since last run (first run defaults to past 7 days)
+# Incremental sync — fetches since last run (defaults to past 7 days on first run)
 bun run sync
 
 # Sync a specific date range
@@ -117,16 +122,11 @@ bun run sync -- --start '25/02/2026' --end '30/05/2026'
 bun run sync -- --start '01/04/2026'
 ```
 
-Dates are in `DD/MM/YYYY` format. Each run appends rows to the **Transactions** tab — existing rows are never overwritten or deleted. Duplicates (same date, time, amount, and narration) are skipped automatically.
+Dates are in `DD/MM/YYYY` format. Each run **appends** rows — existing rows are never overwritten or deleted.
 
-Every row is tagged with a **Period** label (column J) so you can see exactly which sync produced it:
-- Range syncs: `25/02/2026–30/05/2026`
-- Incremental syncs: `after:DD/MM/YYYY`
-
-Use this in Summary with `SUMIFS` to aggregate by period:
-```
-=SUMIFS(Transactions!C:C, Transactions!F:F, "Groceries", Transactions!D:D, "debit", Transactions!J:J, "01/04/2026–30/04/2026")
-```
+**Duplicate handling:**
+- Incremental syncs skip any transaction already in the sheet (matched on date, time, amount, narration)
+- Range syncs only dedup within the same period label — so two overlapping ranges each keep their own rows, letting you compare the same time window queried at different points
 
 The last sync timestamp is saved to `.last-sync` after each successful incremental write. Delete this file to re-sync from scratch. Range syncs (`--start`) never modify `.last-sync`.
 
@@ -146,12 +146,13 @@ The parser receives the email subject and plain-text body and returns a `Transac
 src/
   index.ts          # Orchestrator — runs the full sync flow
   types.ts          # Shared TypeScript interfaces
+  summary.ts        # Per-period summary block writer
   auth/
     google.ts       # OAuth2 token refresh
   gmail/
     client.ts       # Gmail API: list and fetch messages
   sheets/
-    client.ts       # Sheets API: read ranges, append rows
+    client.ts       # Sheets API: read ranges, append rows, grouping, formatting
   parsers/
     registry.ts     # Bank parser registry
     moniepoint.ts   # Moniepoint email parser

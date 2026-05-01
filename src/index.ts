@@ -4,7 +4,8 @@ import "./parsers/moniepoint.ts";
 import { listTransactionEmails, getMessageBody } from "./gmail/client.ts";
 import { parseEmail } from "./parsers/registry.ts";
 import { loadCategoryRules, categorize } from "./categorizer.ts";
-import { readRange, appendRows, ensureTabs } from "./sheets/client.ts";
+import { readRange, appendRows, ensureTabs, applyPeriodGrouping, listSheetTabs } from "./sheets/client.ts";
+import { writePeriodSummary } from "./summary.ts";
 import type { CategorizedTransaction } from "./types.ts";
 
 const LAST_SYNC_FILE = ".last-sync";
@@ -129,7 +130,7 @@ async function main(): Promise<void> {
     console.log(`Fetching emails after: ${new Date(afterTs * 1000).toLocaleString()}`);
   }
 
-  const created = await ensureTabs(sheetId, ["Transactions", "Categories"]);
+  const created = await ensureTabs(sheetId, ["Transactions", "Categories", "Summary"]);
   for (const tab of created) {
     console.log(`  Created missing tab: ${tab}`);
   }
@@ -200,8 +201,26 @@ async function main(): Promise<void> {
     return;
   }
 
+  const tabs = await listSheetTabs(sheetId);
+  const transactionsTab = tabs.find((t) => t.title === "Transactions");
+
+  // Separator row — always visible even when the group is collapsed
+  const COL_COUNT = 10;
+  const separator = [`── ${periodLabel} ──`, ...Array(COL_COUNT - 1).fill("")];
+  const { startRow: separatorRow } = await appendRows(sheetId, TRANSACTIONS_RANGE, [separator]);
+
   const rows = newTransactions.map((tx) => formatRow(tx, periodLabel));
-  await appendRows(sheetId, TRANSACTIONS_RANGE, rows);
+  const { startRow: txStartRow, endRow: txEndRow } = await appendRows(sheetId, TRANSACTIONS_RANGE, rows);
+
+  if (transactionsTab) {
+    await applyPeriodGrouping(sheetId, transactionsTab.sheetId, separatorRow, txStartRow, txEndRow);
+  }
+
+  const summaryTab = tabs.find((t) => t.title === "Summary");
+  if (summaryTab) {
+    await writePeriodSummary(sheetId, summaryTab.sheetId, periodLabel, categoryRules);
+    console.log("  Updated Summary tab");
+  }
 
   if (!isRangeSync) await writeLastSync();
 

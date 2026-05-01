@@ -127,7 +127,8 @@ if (sheetId) {
   const { listSheetTabs, createTab, appendRows, TAB_HEADERS } = await import("../src/sheets/client.ts");
   const REQUIRED_TABS = ["Transactions", "Categories"];
   const existing = await listSheetTabs(sheetId);
-  const missing = REQUIRED_TABS.filter((t) => !existing.includes(t));
+  const existingTitles = existing.map((t) => t.title);
+  const missing = REQUIRED_TABS.filter((t) => !existingTitles.includes(t));
 
   if (missing.length > 0) {
     console.log(`\nThe following required sheet tabs are missing: ${missing.join(", ")}`);
