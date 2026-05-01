@@ -35,10 +35,13 @@ export async function getAccessToken(): Promise<string> {
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(
-      `Failed to refresh access token (${res.status}): ${body}\n` +
-        "Your refresh token may have expired. Run `bun run setup` again."
-    );
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body) as { error?: string; error_description?: string };
+      if (parsed.error) detail = parsed.error_description ? `${parsed.error}: ${parsed.error_description}` : parsed.error;
+    } catch {}
+    const hint = res.status === 400 ? "Run `bun run setup` to get a new refresh token." : "Run `bun run setup` again if this persists.";
+    throw new Error(`Failed to refresh access token (${res.status}): ${detail}\n${hint}`);
   }
 
   const data = (await res.json()) as { access_token: string; expires_in: number };

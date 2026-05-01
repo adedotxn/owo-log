@@ -55,7 +55,11 @@ SHEET_ID=                    # filled in next step
 bun run setup
 ```
 
-This prints a Google OAuth consent URL. Open it in your browser, grant access to Gmail (read) and Google Sheets, then paste the authorization code back into the terminal. Copy the printed refresh token into your `.env`.
+This prints a Google OAuth consent URL. Open it in your browser, grant access to Gmail (read) and Google Sheets, then paste the authorization code back into the terminal.
+
+The script will then ask:
+- **Write token to `.env`?** — say `Y` to update `GOOGLE_REFRESH_TOKEN` automatically, or `n` to copy it manually.
+- **Run `bun run sync` now?** — say `Y` to kick off the first sync immediately once the sheet is configured.
 
 ### 5. Create the Google Sheet
 
@@ -64,38 +68,67 @@ Create a new Google Sheet. The Sheet ID is the long string in the URL:
 https://docs.google.com/spreadsheets/d/SHEET_ID_HERE/edit
 ```
 
-Add it to `.env` as `SHEET_ID=`.
+Add it to `.env` as `SHEET_ID=` before running `bun run setup` (or before the first sync).
 
-The sheet needs three tabs set up as follows:
+#### Required tabs
 
-**Transactions** — add this header in row 1 (one word per column, A–I):
+`bun run setup` will detect missing tabs and offer to create them with the correct headers automatically. You can also create them manually:
 
-| Date | Time | Amount | Direction | Narration | Category | Balance | Bank | Flagged |
+**Transactions** tab — columns A–J, header in row 1:
 
-**Categories** — header in row 1, rules from row 2:
+| A: Date | B: Time | C: Amount | D: Direction | E: Narration | F: Category | G: Balance | H: Bank | I: Flagged | J: Period |
+|---|---|---|---|---|---|---|---|---|---|
+| 30/04/2026 | 14:23:01 | 4500 | debit | POS PURCHASE SHOPRITE | Groceries | 120000 | Moniepoint | | 01/04/2026–30/04/2026 |
+| 30/04/2026 | 09:10:44 | 15000 | credit | TRANSFER FROM JOHN DOE | Uncategorized | 135000 | Moniepoint | YES | after:24/04/2026 |
 
-| Category | Keywords |
+**Categories** tab — columns A–B, header in row 1, rules from row 2:
+
+| A: Category | B: Keywords |
 |---|---|
 | Food Delivery | FoodExpress, Captain Cook |
 | Near-home Groceries | STORE_NEAR_YOU, GROCERY_STORE |
 | ... | ... |
+| Food Delivery | FoodExpress, Foodhut, Captain Cook, Leeyah |
+| Groceries | SHOPRITE, SPAR, Justrite |
+| Transport | UBER, BOLT, RIDEPOOL |
+| Near-home Groceries | STORE_NEAR_YOU, GROCERY_STORE |
 
-Keywords are comma-separated and matched case-insensitively against the transaction narration. Add or edit rows here at any time — the script reads this tab fresh on every run.
+Keywords are comma-separated and matched case-insensitively against the transaction narration. Add or edit rows here at any time — the script reads this tab fresh on every run. Any transaction with no keyword match is written as `Uncategorized` with `Flagged = YES`.
 
-**Summary** (optional) — use `SUMIFS` formulas to track spending per category:
-```
-=SUMIFS(Transactions!C:C, Transactions!F:F, A2, Transactions!D:D, "debit")
-```
+> If a tab is missing when `bun run sync` runs, it is created automatically with the correct headers.
+
+**Summary** tab (optional) — use `SUMIFS` formulas to track spending per category:
+
+| A: Category | B: Total Spent |
+|---|---|
+| Groceries | `=SUMIFS(Transactions!C:C, Transactions!F:F, A2, Transactions!D:D, "debit")` |
+| Food Delivery | `=SUMIFS(Transactions!C:C, Transactions!F:F, A3, Transactions!D:D, "debit")` |
 
 ## Usage
 
 ```sh
+# Incremental sync — fetches since last run (first run defaults to past 7 days)
 bun run sync
+
+# Sync a specific date range
+bun run sync -- --start '25/02/2026' --end '30/05/2026'
+
+# Start date only — end defaults to today
+bun run sync -- --start '01/04/2026'
 ```
 
-Fetches all transaction emails since the last sync (defaults to the past 7 days on first run), categorizes them, and appends new rows to the sheet. Duplicates are automatically skipped.
+Dates are in `DD/MM/YYYY` format. Each run appends rows to the **Transactions** tab — existing rows are never overwritten or deleted. Duplicates (same date, time, amount, and narration) are skipped automatically.
 
-The last sync timestamp is saved to `.last-sync` after each successful write. Delete this file to re-sync from scratch.
+Every row is tagged with a **Period** label (column J) so you can see exactly which sync produced it:
+- Range syncs: `25/02/2026–30/05/2026`
+- Incremental syncs: `after:DD/MM/YYYY`
+
+Use this in Summary with `SUMIFS` to aggregate by period:
+```
+=SUMIFS(Transactions!C:C, Transactions!F:F, "Groceries", Transactions!D:D, "debit", Transactions!J:J, "01/04/2026–30/04/2026")
+```
+
+The last sync timestamp is saved to `.last-sync` after each successful incremental write. Delete this file to re-sync from scratch. Range syncs (`--start`) never modify `.last-sync`.
 
 ## Adding a new bank
 

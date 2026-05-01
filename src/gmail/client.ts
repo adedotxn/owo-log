@@ -56,10 +56,10 @@ async function gmailFetch(path: string): Promise<Response> {
   return res;
 }
 
-export async function listTransactionEmails(afterDate?: string): Promise<string[]> {
-  const query = afterDate
-    ? `from:moniepoint.com (subject:"Debit alert" OR subject:"Credit alert") after:${afterDate}`
-    : `from:moniepoint.com (subject:"Debit alert" OR subject:"Credit alert")`;
+export async function listTransactionEmails(afterDate?: string, beforeDate?: string): Promise<string[]> {
+  let query = `from:moniepoint.com (subject:"Debit alert" OR subject:"Credit alert")`;
+  if (afterDate) query += ` after:${afterDate}`;
+  if (beforeDate) query += ` before:${beforeDate}`;
 
   const ids: string[] = [];
   let pageToken: string | undefined;
