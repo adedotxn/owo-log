@@ -6,12 +6,13 @@ import { parseEmail } from "./parsers/registry.ts";
 import { loadCategoryRules, categorize } from "./categorizer.ts";
 import { readRange, appendRows, ensureTabs, applyPeriodGrouping, listSheetTabs } from "./sheets/client.ts";
 import { writePeriodSummary } from "./summary.ts";
+import { spinner, header, info, warn, done, fmtMs } from "./ui.ts";
 import type { CategorizedTransaction } from "./types.ts";
 
-const LAST_SYNC_FILE = ".last-sync";
+const LAST_SYNC_FILE    = ".last-sync";
 const TRANSACTIONS_RANGE = "Transactions!A:J";
+const COL_COUNT          = 10;
 
-// Parse DD/MM/YYYY → Unix timestamp (seconds). Treats date as start-of-day UTC.
 function parseDateArg(value: string): number {
   const [day, month, year] = value.split("/").map(Number);
   if (!day || !month || !year) throw new Error(`Invalid date "${value}" — expected DD/MM/YYYY`);
@@ -59,10 +60,6 @@ function deduplicateAgainstExisting(
   period: string,
   isRangeSync: boolean
 ): CategorizedTransaction[] {
-  // Range syncs: only dedup within the same period label (col J = index 9).
-  // This lets two overlapping range queries each keep their own rows while
-  // preventing the exact same range from being written twice.
-  // Incremental syncs: dedup across all existing rows regardless of period.
   const rowsToCheck = isRangeSync
     ? existingRows.filter((row) => row[9] === period)
     : existingRows;
@@ -77,15 +74,15 @@ function deduplicateAgainstExisting(
   });
 }
 
-function formatRow(tx: CategorizedTransaction, period: string): string[] {
+function formatRow(tx: CategorizedTransaction, period: string): (string | number)[] {
   return [
     tx.date,
     tx.time,
-    String(tx.amount),
+    tx.amount,      // number — stored as numeric cell so SUMIFS can aggregate it
     tx.direction,
     tx.narration,
     tx.category,
-    String(tx.balance),
+    tx.balance,     // number
     tx.bank,
     tx.flagged ? "YES" : "",
     period,
@@ -93,11 +90,10 @@ function formatRow(tx: CategorizedTransaction, period: string): string[] {
 }
 
 async function main(): Promise<void> {
+  const syncStart = Date.now();
+
   const sheetId = process.env.SHEET_ID;
-  if (!sheetId) {
-    console.error("Error: SHEET_ID is not set in .env");
-    process.exit(1);
-  }
+  if (!sheetId) throw new Error("SHEET_ID is not set in .env");
 
   const { start: startArg, end: endArg } = parseArgs();
   const isRangeSync = !!startArg;
@@ -107,10 +103,8 @@ async function main(): Promise<void> {
 
   if (isRangeSync) {
     afterTs = parseDateArg(startArg!);
-    // end defaults to today (inclusive: use start of next day as the before: timestamp)
     if (endArg) {
-      const endDay = parseDateArg(endArg);
-      beforeTs = endDay + 86400; // include the end date's transactions
+      beforeTs = parseDateArg(endArg) + 86400;
     } else {
       const today = new Date();
       beforeTs = Math.floor(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)).getTime() / 1000);
@@ -120,92 +114,114 @@ async function main(): Promise<void> {
   }
 
   const periodLabel = isRangeSync
-    ? `${formatDateLabel(afterTs)}–${formatDateLabel(beforeTs! - 86400)}`
+    ? `${formatDateLabel(afterTs)} - ${formatDateLabel(beforeTs! - 86400)}`
     : `after:${formatDateLabel(afterTs)}`;
 
-  console.log("owo-log: Starting sync...");
+  header("owo-log");
   if (isRangeSync) {
-    console.log(`Range: ${periodLabel}`);
+    info("range", periodLabel);
   } else {
-    console.log(`Fetching emails after: ${new Date(afterTs * 1000).toLocaleString()}`);
+    info("since", new Date(afterTs * 1000).toLocaleDateString());
   }
+  process.stdout.write("\n");
 
+  // Ensure sheet tabs exist
+  let t = Date.now();
+  spinner.start("verifying sheet tabs");
   const created = await ensureTabs(sheetId, ["Transactions", "Categories", "Summary"]);
-  for (const tab of created) {
-    console.log(`  Created missing tab: ${tab}`);
-  }
+  spinner.succeed(
+    created.length > 0 ? `created tabs: ${created.join(", ")}` : "sheet tabs ready",
+    Date.now() - t
+  );
 
+  // Fetch email list
+  t = Date.now();
+  spinner.start("fetching emails");
   const messageIds = await listTransactionEmails(String(afterTs), beforeTs ? String(beforeTs) : undefined);
-  console.log(`Found ${messageIds.length} transaction email(s)`);
 
   if (messageIds.length === 0) {
-    console.log("Nothing to sync.");
-    if (!isRangeSync) await writeLastSync();
+    spinner.succeed("no emails found", Date.now() - t);
+    info("nothing to sync");
     return;
   }
+  spinner.succeed(`found ${messageIds.length} email(s)`, Date.now() - t);
 
+  // Load category rules
+  t = Date.now();
+  spinner.start("loading category rules");
+  const categoryRules = await loadCategoryRules(sheetId);
+  spinner.succeed(`${categoryRules.length} category rule(s) loaded`, Date.now() - t);
+
+  // Fetch and parse each email
   const transactions: CategorizedTransaction[] = [];
   const parseFailures: string[] = [];
 
-  const categoryRules = await loadCategoryRules(sheetId);
-  console.log(`Loaded ${categoryRules.length} category rule(s) from sheet`);
-
-  for (const id of messageIds) {
+  t = Date.now();
+  spinner.start("parsing emails");
+  for (let i = 0; i < messageIds.length; i++) {
+    spinner.progress(i + 1, messageIds.length);
+    const id = messageIds[i];
     let subject: string;
     let body: string;
-
     try {
       ({ subject, body } = await getMessageBody(id));
-    } catch (err) {
-      console.error(`  Failed to fetch message ${id}:`, err);
-      continue;
-    }
-
-    const tx = parseEmail(subject, body);
-    if (!tx) {
+    } catch {
       parseFailures.push(id);
       continue;
     }
-
+    const tx = parseEmail(subject, body);
+    if (!tx) { parseFailures.push(id); continue; }
     transactions.push(categorize(tx, categoryRules));
   }
 
+  spinner.succeed(
+    parseFailures.length > 0
+      ? `parsed ${transactions.length}/${messageIds.length}  ·  ${parseFailures.length} unrecognized`
+      : `parsed ${transactions.length} transaction(s)`,
+    Date.now() - t
+  );
+
   if (parseFailures.length > 0) {
-    console.warn(
-      `  ${parseFailures.length} email(s) not recognized by any parser (new bank? check message IDs: ${parseFailures.join(", ")})`
-    );
+    warn(`unrecognized email IDs: ${parseFailures.join(", ")}`);
   }
 
   if (transactions.length === 0) {
-    console.log("No transactions parsed.");
+    info("no transactions parsed");
     if (!isRangeSync) await writeLastSync();
     return;
   }
 
-  // Dedup against last 500 rows in the sheet
+  // Dedup against existing sheet rows
+  t = Date.now();
+  spinner.start("checking for duplicates");
   let existingRows: string[][] = [];
   try {
-    existingRows = await readRange(sheetId, "Transactions!A2:J501");
+    existingRows = await readRange(sheetId, "Transactions!A2:J501", "UNFORMATTED_VALUE");
   } catch {
-    console.warn("  Could not read existing rows for dedup — proceeding without dedup check");
+    spinner.warn("could not read existing rows — skipping dedup check");
   }
 
   const newTransactions = deduplicateAgainstExisting(transactions, existingRows, periodLabel, isRangeSync);
   const skipped = transactions.length - newTransactions.length;
 
-  if (skipped > 0) console.log(`  Skipped ${skipped} duplicate(s)`);
+  if (skipped > 0) {
+    spinner.succeed(`${skipped} duplicate(s) skipped`, Date.now() - t);
+  } else {
+    spinner.succeed("no duplicates found", Date.now() - t);
+  }
 
   if (newTransactions.length === 0) {
-    console.log("All transactions already in sheet. Nothing to write.");
+    info("all transactions already in sheet");
     if (!isRangeSync) await writeLastSync();
     return;
   }
 
+  // Write to Transactions tab
+  t = Date.now();
+  spinner.start("writing to sheet");
   const tabs = await listSheetTabs(sheetId);
-  const transactionsTab = tabs.find((t) => t.title === "Transactions");
+  const transactionsTab = tabs.find((tab) => tab.title === "Transactions");
 
-  // Separator row — always visible even when the group is collapsed
-  const COL_COUNT = 10;
   const separator = [`── ${periodLabel} ──`, ...Array(COL_COUNT - 1).fill("")];
   const { startRow: separatorRow } = await appendRows(sheetId, TRANSACTIONS_RANGE, [separator]);
 
@@ -215,23 +231,29 @@ async function main(): Promise<void> {
   if (transactionsTab) {
     await applyPeriodGrouping(sheetId, transactionsTab.sheetId, separatorRow, txStartRow, txEndRow);
   }
+  spinner.succeed(`wrote ${newTransactions.length} row(s)`, Date.now() - t);
 
-  const summaryTab = tabs.find((t) => t.title === "Summary");
+  // Write per-period summary
+  const summaryTab = tabs.find((tab) => tab.title === "Summary");
   if (summaryTab) {
+    t = Date.now();
+    spinner.start("updating summary");
     await writePeriodSummary(sheetId, summaryTab.sheetId, periodLabel, categoryRules);
-    console.log("  Updated Summary tab");
+    spinner.succeed("summary updated", Date.now() - t);
   }
 
   if (!isRangeSync) await writeLastSync();
 
-  const flagged = newTransactions.filter((t) => t.flagged).length;
-  console.log(
-    `\nDone! Synced ${newTransactions.length} transaction(s) [${periodLabel}]` +
-      (flagged > 0 ? ` (${flagged} flagged as Uncategorized — review your Categories tab)` : "")
+  const flagged = newTransactions.filter((tx) => tx.flagged).length;
+  done(
+    flagged > 0
+      ? `${newTransactions.length} synced  ·  ${flagged} flagged`
+      : `${newTransactions.length} synced`,
+    Date.now() - syncStart
   );
 }
 
 main().catch((err) => {
-  console.error("\nSync failed:", err instanceof Error ? err.message : err);
+  spinner.fail(err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

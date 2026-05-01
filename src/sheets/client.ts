@@ -22,22 +22,29 @@ async function sheetsFetch(
   return res;
 }
 
-export async function readRange(sheetId: string, range: string): Promise<string[][]> {
+// valueRenderOption="UNFORMATTED_VALUE" returns raw numbers/booleans; all cells are stringified
+// so the return type is always string[][] regardless of option.
+export async function readRange(
+  sheetId: string,
+  range: string,
+  valueRenderOption: "FORMATTED_VALUE" | "UNFORMATTED_VALUE" = "FORMATTED_VALUE"
+): Promise<string[][]> {
   const res = await sheetsFetch(
-    `/${sheetId}/values/${encodeURIComponent(range)}`
+    `/${sheetId}/values/${encodeURIComponent(range)}?valueRenderOption=${valueRenderOption}`
   );
-  const data = (await res.json()) as { values?: string[][] };
-  return data.values ?? [];
+  const data = (await res.json()) as { values?: unknown[][] };
+  return (data.values ?? []).map((row) => row.map((cell) => String(cell ?? "")));
 }
 
 // Returns 0-based { startRow, endRow } where endRow is exclusive (matches Sheets API index convention).
 export async function appendRows(
   sheetId: string,
   range: string,
-  rows: string[][]
+  rows: (string | number)[][],
+  valueInputOption: "RAW" | "USER_ENTERED" = "RAW"
 ): Promise<{ startRow: number; endRow: number }> {
   const res = await sheetsFetch(
-    `/${sheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
+    `/${sheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=${valueInputOption}`,
     {
       method: "POST",
       body: JSON.stringify({ values: rows }),

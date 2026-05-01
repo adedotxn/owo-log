@@ -37,7 +37,7 @@ export async function writePeriodSummary(
     ["", "", ""],
   ];
 
-  const { startRow } = await appendRows(sheetId, SUMMARY_RANGE, allRows);
+  const { startRow } = await appendRows(sheetId, SUMMARY_RANGE, allRows, "USER_ENTERED");
 
   const headerIdx = startRow;
   const subheaderIdx = startRow + 1;
