@@ -120,6 +120,14 @@ bun run sync -- --start '25/02/2026' --end '30/05/2026'
 
 # Start date only — end defaults to today
 bun run sync -- --start '01/04/2026'
+
+# Current calendar week (Sunday 00:00 → Saturday 23:59, local time)
+# Safe to run any day of the week — Saturday is included even if it hasn't arrived yet
+bun run sync -- --week
+
+# Current day (00:00 → 23:59, local time)
+# Designed for automation — run at any hour to capture everything so far today
+bun run sync -- --today
 ```
 
 Dates are in `DD/MM/YYYY` format. Each run **appends** rows — existing rows are never overwritten or deleted.

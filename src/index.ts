@@ -24,15 +24,47 @@ function formatDateLabel(ts: number): string {
   return `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`;
 }
 
-function parseArgs(): { start?: string; end?: string } {
+function parseArgs(): { start?: string; end?: string; week: boolean; today: boolean } {
   const args = process.argv.slice(2);
   let start: string | undefined;
   let end: string | undefined;
+  let week = false;
+  let today = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--start" && args[i + 1]) start = args[++i];
     else if (args[i] === "--end" && args[i + 1]) end = args[++i];
+    else if (args[i] === "--week") week = true;
+    else if (args[i] === "--today") today = true;
   }
-  return { start, end };
+  return { start, end, week, today };
+}
+
+// Local-time helpers — week/today boundaries follow the user's clock, not UTC.
+function localDateStr(d: Date): string {
+  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+}
+
+function getWeekRange(): { afterTs: number; beforeTs: number; periodLabel: string } {
+  const now = new Date();
+  const sunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
+  const saturday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay() + 6, 0, 0, 0, 0);
+  const nextSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay() + 7, 0, 0, 0, 0);
+  return {
+    afterTs: Math.floor(sunday.getTime() / 1000),
+    beforeTs: Math.floor(nextSunday.getTime() / 1000),
+    periodLabel: `week ${localDateStr(sunday)} - ${localDateStr(saturday)}`,
+  };
+}
+
+function getTodayRange(): { afterTs: number; beforeTs: number; periodLabel: string } {
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  return {
+    afterTs: Math.floor(startOfDay.getTime() / 1000),
+    beforeTs: Math.floor(endOfDay.getTime() / 1000),
+    periodLabel: `today ${localDateStr(startOfDay)}`,
+  };
 }
 
 function getDefaultAfterDate(): string {
@@ -95,34 +127,42 @@ async function main(): Promise<void> {
   const sheetId = process.env.SHEET_ID;
   if (!sheetId) throw new Error("SHEET_ID is not set in .env");
 
-  const { start: startArg, end: endArg } = parseArgs();
-  const isRangeSync = !!startArg;
+  const { start: startArg, end: endArg, week: weekFlag, today: todayFlag } = parseArgs();
+  const isRangeSync = !!(startArg || weekFlag || todayFlag);
 
   let afterTs: number;
   let beforeTs: number | undefined;
+  let periodLabel: string;
+  let displayMode: "range" | "week" | "today" | "since";
 
-  if (isRangeSync) {
-    afterTs = parseDateArg(startArg!);
+  if (weekFlag) {
+    ({ afterTs, beforeTs, periodLabel } = getWeekRange());
+    displayMode = "week";
+  } else if (todayFlag) {
+    ({ afterTs, beforeTs, periodLabel } = getTodayRange());
+    displayMode = "today";
+  } else if (startArg) {
+    afterTs = parseDateArg(startArg);
     if (endArg) {
       beforeTs = parseDateArg(endArg) + 86400;
     } else {
-      const today = new Date();
-      beforeTs = Math.floor(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)).getTime() / 1000);
+      const now = new Date();
+      beforeTs = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() / 1000);
     }
+    periodLabel = `${formatDateLabel(afterTs)} - ${formatDateLabel(beforeTs - 86400)}`;
+    displayMode = "range";
   } else {
     afterTs = parseInt(await readLastSync());
+    beforeTs = undefined;
+    periodLabel = `after:${formatDateLabel(afterTs)}`;
+    displayMode = "since";
   }
-
-  const periodLabel = isRangeSync
-    ? `${formatDateLabel(afterTs)} - ${formatDateLabel(beforeTs! - 86400)}`
-    : `after:${formatDateLabel(afterTs)}`;
 
   header("owo-log");
-  if (isRangeSync) {
-    info("range", periodLabel);
-  } else {
-    info("since", new Date(afterTs * 1000).toLocaleDateString());
-  }
+  if (displayMode === "week") info("week", periodLabel.replace("week ", ""));
+  else if (displayMode === "today") info("today", periodLabel.replace("today ", ""));
+  else if (displayMode === "range") info("range", periodLabel);
+  else info("since", new Date(afterTs * 1000).toLocaleDateString());
   process.stdout.write("\n");
 
   // Ensure sheet tabs exist
