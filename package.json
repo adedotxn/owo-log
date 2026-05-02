@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "sync": "bun run src/index.ts",
-    "setup": "bun run scripts/setup-auth.ts"
+    "setup": "bun run scripts/setup-auth.ts",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest"

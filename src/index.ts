@@ -6,23 +6,13 @@ import { parseEmail } from "./parsers/registry.ts";
 import { loadCategoryRules, categorize } from "./categorizer.ts";
 import { readRange, appendRows, ensureTabs, applyPeriodGrouping, listSheetTabs } from "./sheets/client.ts";
 import { writePeriodSummary } from "./summary.ts";
-import { spinner, header, info, warn, done, fmtMs } from "./ui.ts";
+import { spinner, header, info, warn, done } from "./ui.ts";
+import { parseDateArg, formatDateLabel, getWeekRange, getTodayRange, deduplicateAgainstExisting } from "./utils.ts";
 import type { CategorizedTransaction } from "./types.ts";
 
 const LAST_SYNC_FILE    = ".last-sync";
 const TRANSACTIONS_RANGE = "Transactions!A:J";
 const COL_COUNT          = 10;
-
-function parseDateArg(value: string): number {
-  const [day, month, year] = value.split("/").map(Number);
-  if (!day || !month || !year) throw new Error(`Invalid date "${value}" — expected DD/MM/YYYY`);
-  return Math.floor(new Date(Date.UTC(year, month - 1, day)).getTime() / 1000);
-}
-
-function formatDateLabel(ts: number): string {
-  const d = new Date(ts * 1000);
-  return `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`;
-}
 
 function parseArgs(): { start?: string; end?: string; week: boolean; today: boolean } {
   const args = process.argv.slice(2);
@@ -37,34 +27,6 @@ function parseArgs(): { start?: string; end?: string; week: boolean; today: bool
     else if (args[i] === "--today") today = true;
   }
   return { start, end, week, today };
-}
-
-// Local-time helpers — week/today boundaries follow the user's clock, not UTC.
-function localDateStr(d: Date): string {
-  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
-}
-
-function getWeekRange(): { afterTs: number; beforeTs: number; periodLabel: string } {
-  const now = new Date();
-  const sunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay(), 0, 0, 0, 0);
-  const saturday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay() + 6, 0, 0, 0, 0);
-  const nextSunday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay() + 7, 0, 0, 0, 0);
-  return {
-    afterTs: Math.floor(sunday.getTime() / 1000),
-    beforeTs: Math.floor(nextSunday.getTime() / 1000),
-    periodLabel: `week ${localDateStr(sunday)} - ${localDateStr(saturday)}`,
-  };
-}
-
-function getTodayRange(): { afterTs: number; beforeTs: number; periodLabel: string } {
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  return {
-    afterTs: Math.floor(startOfDay.getTime() / 1000),
-    beforeTs: Math.floor(endOfDay.getTime() / 1000),
-    periodLabel: `today ${localDateStr(startOfDay)}`,
-  };
 }
 
 function getDefaultAfterDate(): string {
@@ -84,26 +46,6 @@ async function readLastSync(): Promise<string> {
 
 async function writeLastSync(): Promise<void> {
   await Bun.write(LAST_SYNC_FILE, String(Math.floor(Date.now() / 1000)));
-}
-
-function deduplicateAgainstExisting(
-  transactions: CategorizedTransaction[],
-  existingRows: string[][],
-  period: string,
-  isRangeSync: boolean
-): CategorizedTransaction[] {
-  const rowsToCheck = isRangeSync
-    ? existingRows.filter((row) => row[9] === period)
-    : existingRows;
-
-  const existingKeys = new Set(
-    rowsToCheck.map((row) => `${row[0]}|${row[1]}|${row[2]}|${row[4]}`)
-  );
-
-  return transactions.filter((tx) => {
-    const key = `${tx.date}|${tx.time}|${tx.amount}|${tx.narration}`;
-    return !existingKeys.has(key);
-  });
 }
 
 function formatRow(tx: CategorizedTransaction, period: string): (string | number)[] {
@@ -198,9 +140,8 @@ async function main(): Promise<void> {
 
   t = Date.now();
   spinner.start("parsing emails");
-  for (let i = 0; i < messageIds.length; i++) {
+  for (const [i, id] of messageIds.entries()) {
     spinner.progress(i + 1, messageIds.length);
-    const id = messageIds[i];
     let subject: string;
     let body: string;
     try {

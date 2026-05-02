@@ -55,9 +55,9 @@ export async function appendRows(
 }
 
 // "Sheet!A11:J15" → startRow=10, endRow=15 (0-based, endRow exclusive)
-function parseUpdatedRange(range: string): { startRow: number; endRow: number } {
+export function parseUpdatedRange(range: string): { startRow: number; endRow: number } {
   const match = range.match(/[A-Z]+(\d+):[A-Z]+(\d+)/);
-  if (!match) throw new Error(`Could not parse updated range: ${range}`);
+  if (!match || !match[1] || !match[2]) throw new Error(`Could not parse updated range: ${range}`);
   return {
     startRow: parseInt(match[1]) - 1,
     endRow: parseInt(match[2]),
